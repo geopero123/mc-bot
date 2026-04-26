@@ -24,7 +24,7 @@ const fetchFn = globalThis.fetch || nodeFetchModule?.default || nodeFetchModule
 const CONFIG = {
   host:     process.env.HOST         || 'SINNED998467.aternos.me',
   port:     Number(process.env.PORT  || 49274),
-  username: process.env.USERNAME_MC  || 'belu-mom',
+  username: process.env.USERNAME_MC  || 'geo-slave',
   auth:     process.env.AUTH_MODE    || 'auto',
   owner:    'rip_geopero123',
   maxChatLength: 240,
