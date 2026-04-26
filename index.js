@@ -22,8 +22,9 @@ const fetchFn = globalThis.fetch || nodeFetchModule?.default || nodeFetchModule
    CONFIGURATION
 ═══════════════════════════════════════════ */
 const CONFIG = {
-  host:     process.env.HOST         || 'SINNED998467.aternos.me',
-  port:     Number(process.env.PORT  || 49274),
+  // Use MC_HOST/MC_PORT on hosts like Render where PORT is reserved for web service.
+  host:     process.env.MC_HOST      || process.env.HOST || 'SINNED998467.aternos.me',
+  port:     Number(process.env.MC_PORT || process.env.PORT || 49274),
   username: process.env.USERNAME_MC  || 'geo-slave',
   auth:     process.env.AUTH_MODE    || 'auto',
   owner:    'rip_geopero123',
@@ -2410,4 +2411,5 @@ function gracefulShutdown () {
 }
 
 const http = require('http')
-http.createServer((req, res) => res.end('Bot is running!')).listen(process.env.PORT || 3000)
+const webPort = Number(process.env.WEB_PORT || process.env.PORT || 3000)
+http.createServer((req, res) => res.end('Bot is running!')).listen(webPort)
