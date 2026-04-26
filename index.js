@@ -2210,10 +2210,11 @@ function scheduleReconnect (reason = 'disconnect', immediate = false) {
   if (reconnectTimer) return
 
   reconnectCount++
-  const baseDelay = immediate ? 0 : (Math.min(30000, 5000 * reconnectCount) + Math.random() * 2000)
-  const resetBackoff = Math.min(120000, econnresetStreak * 8000)
+  // Aternos frequently drops handshake packets; retry faster, especially early attempts.
+  const baseDelay = immediate ? 0 : (Math.min(15000, 2000 * reconnectCount) + Math.random() * 1000)
+  const resetBackoff = Math.min(45000, econnresetStreak * 3000)
   const delay = baseDelay + reconnectPenaltyMs + resetBackoff
-  reconnectPenaltyMs = Math.max(0, reconnectPenaltyMs - 5000)
+  reconnectPenaltyMs = Math.max(0, reconnectPenaltyMs - 2000)
 
   console.log(`[bot] Reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${reconnectCount}, reason: ${reconnectReason})`)
   reconnectTimer = setTimeout(() => {
@@ -2358,12 +2359,13 @@ function createBot () {
     const code = err?.code || err?.message
     if (code === 'ECONNRESET') {
       econnresetStreak += 1
-      reconnectPenaltyMs = Math.min(120000, reconnectPenaltyMs + 5000)
+      reconnectPenaltyMs = Math.min(30000, reconnectPenaltyMs + 1500)
 
-      if (CONFIG.auth === 'auto' && econnresetStreak >= 3) {
+      // Switch auth mode earlier to recover quicker from server-side auth mismatch.
+      if (CONFIG.auth === 'auto' && econnresetStreak >= 2) {
         activeAuthMode = (activeAuthMode === 'offline') ? 'microsoft' : 'offline'
         econnresetStreak = 0
-        reconnectPenaltyMs = Math.min(120000, reconnectPenaltyMs + 10000)
+        reconnectPenaltyMs = Math.min(30000, reconnectPenaltyMs + 2500)
         console.log(`[bot] Auto-switching auth mode to: ${activeAuthMode}`)
       }
     }
@@ -2374,7 +2376,7 @@ function createBot () {
 
   thisBot.on('kicked', reason => {
     if (myGeneration !== reconnectGeneration || thisBot !== bot) return
-    reconnectPenaltyMs = Math.min(120000, reconnectPenaltyMs + 15000)
+    reconnectPenaltyMs = Math.min(45000, reconnectPenaltyMs + 6000)
     console.log('[bot] Kicked:', reason)
     scheduleReconnect('kicked')
   })
