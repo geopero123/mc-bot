@@ -2187,79 +2187,149 @@ async function handleMessage (rawMessage) {
 /* ═══════════════════════════════════════════
    BOT LIFECYCLE
 ═══════════════════════════════════════════ */
-function scheduleReconnect () {
+let shuttingDown = false
+let connectWatchdogTimer = null
+let reconnectReason = 'startup'
+let reconnectGeneration = 0
+
+function clearRuntimeLoops () {
+  if (survivalTimer)  { clearInterval(survivalTimer);  survivalTimer = null }
+  if (robotTimer)     { clearInterval(robotTimer);     robotTimer = null }
+  if (autoEatTimer)   { clearInterval(autoEatTimer);   autoEatTimer = null }
+  stopDefend()
+}
+
+function clearReconnectTimers () {
+  if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
+  if (connectWatchdogTimer) { clearTimeout(connectWatchdogTimer); connectWatchdogTimer = null }
+}
+
+function scheduleReconnect (reason = 'disconnect', immediate = false) {
+  if (shuttingDown) return
+  reconnectReason = reason || reconnectReason
   if (reconnectTimer) return
+
   reconnectCount++
-  const baseDelay = Math.min(30000, 5000 * reconnectCount) + Math.random() * 2000
+  const baseDelay = immediate ? 0 : (Math.min(30000, 5000 * reconnectCount) + Math.random() * 2000)
   const resetBackoff = Math.min(120000, econnresetStreak * 8000)
   const delay = baseDelay + reconnectPenaltyMs + resetBackoff
   reconnectPenaltyMs = Math.max(0, reconnectPenaltyMs - 5000)
-  console.log(`[bot] Reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${reconnectCount})`)
+
+  console.log(`[bot] Reconnecting in ${(delay / 1000).toFixed(1)}s (attempt ${reconnectCount}, reason: ${reconnectReason})`)
   reconnectTimer = setTimeout(() => {
     reconnectTimer = null
     createBot()
   }, delay)
 }
 
+function tryInstantRespawn () {
+  if (!bot || shuttingDown) return
+  // Keep retrying for a few seconds; some servers delay the death screen packet.
+  let tries = 0
+  const maxTries = 15
+  const timer = setInterval(() => {
+    tries++
+    if (!bot || shuttingDown || tries > maxTries) {
+      clearInterval(timer)
+      return
+    }
+    try {
+      if (typeof bot.respawn === 'function') bot.respawn()
+      else if (bot._client && typeof bot._client.write === 'function') {
+        // Protocol fallback for older versions.
+        bot._client.write('client_command', { actionId: 0 })
+      }
+    } catch (_) {}
+  }, 200)
+}
+
 function createBot () {
+  if (shuttingDown) return
+  clearReconnectTimers()
+  clearRuntimeLoops()
+  reconnectGeneration += 1
+  const myGeneration = reconnectGeneration
+
+  // Ensure old instance is closed before replacing.
+  if (bot) {
+    try { bot.end('reconnecting') } catch (_) {}
+  }
+
   console.log(`[bot] Connecting → ${CONFIG.host}:${CONFIG.port} as ${CONFIG.username} (${activeAuthMode})`)
-  bot = mineflayer.createBot({
+  const thisBot = mineflayer.createBot({
     host:     CONFIG.host,
     port:     CONFIG.port,
     username: CONFIG.username,
     auth:     activeAuthMode,
   })
-  bot.loadPlugin(pathfinder)
+  bot = thisBot
+  thisBot.loadPlugin(pathfinder)
   mcData = null
 
+  // If we don't spawn quickly, force a reconnect.
+  connectWatchdogTimer = setTimeout(() => {
+    if (shuttingDown || myGeneration !== reconnectGeneration) return
+    console.log('[bot] Connect watchdog timeout — forcing reconnect')
+    try { thisBot.end('connect_watchdog_timeout') } catch (_) {}
+    scheduleReconnect('connect_watchdog_timeout', true)
+  }, 35000)
+
   /* ── spawn ── */
-  bot.once('spawn', () => {
+  thisBot.once('spawn', () => {
+    if (myGeneration !== reconnectGeneration || thisBot !== bot) return
+    if (connectWatchdogTimer) { clearTimeout(connectWatchdogTimer); connectWatchdogTimer = null }
+    if (reconnectTimer) { clearTimeout(reconnectTimer); reconnectTimer = null }
     reconnectCount = 0
     reconnectPenaltyMs = 0
     econnresetStreak = 0
     drowningEscape = false
     miningActive = false
-    mcData = require('minecraft-data')(bot.version)
-    console.log('[bot] Spawned as', bot.username, '— version', bot.version)
+    dragonActive = false
+    mcData = require('minecraft-data')(thisBot.version)
+    console.log('[bot] Spawned as', thisBot.username, '— version', thisBot.version)
     startSurvivalLoop()
   })
 
   /* ── death ── */
-  bot.on('death', () => {
-    if (bot.entity) {
-      deathLocation = bot.entity.position.clone()
+  thisBot.on('death', () => {
+    if (myGeneration !== reconnectGeneration || thisBot !== bot) return
+    if (thisBot.entity) {
+      deathLocation = thisBot.entity.position.clone()
       console.log('[bot] Died at', Math.round(deathLocation.x), Math.round(deathLocation.y), Math.round(deathLocation.z))
     }
     stopAllTasks()
     drowningEscape = false
     miningActive = false
+    dragonActive = false
+    tryInstantRespawn()
   })
 
   /* ── health low warning ── */
-  bot.on('health', () => {
-    if ((bot.health ?? 20) <= 4) {
-      console.log('[survival] Critical HP:', bot.health)
+  thisBot.on('health', () => {
+    if (myGeneration !== reconnectGeneration || thisBot !== bot) return
+    if ((thisBot.health ?? 20) <= 4) {
+      console.log('[survival] Critical HP:', thisBot.health)
     }
   })
 
   /* ── real-time drowning hook via physicsTickEnded ── */
-  // This fires 20x/second and catches drowning faster than the survival interval
-  bot.on('physicsTick', () => {
-    if (!drowningEscape && bot?.entity && isSubmerged()) {
-      const air = bot.oxygenLevel ?? 300
+  thisBot.on('physicsTick', () => {
+    if (myGeneration !== reconnectGeneration || thisBot !== bot) return
+    if (!drowningEscape && thisBot?.entity && isSubmerged()) {
+      const air = thisBot.oxygenLevel ?? 300
       if (air < 150) {
-        // Emergency: immediately jump
-        bot.setControlState('jump', true)
+        thisBot.setControlState('jump', true)
         setTimeout(() => {
-          if (bot) bot.setControlState('jump', false)
+          if (bot === thisBot) thisBot.setControlState('jump', false)
         }, 200)
       }
     }
   })
 
   /* ── chat ── */
-  bot.on('chat', async (chatUsername, message) => {
-    if (chatUsername === bot.username) return
+  thisBot.on('chat', async (chatUsername, message) => {
+    if (myGeneration !== reconnectGeneration || thisBot !== bot) return
+    if (chatUsername === thisBot.username) return
     if (chatUsername !== CONFIG.owner) return
 
     let reply = null
@@ -2274,15 +2344,17 @@ function createBot () {
   })
 
   /* ── whisper support ── */
-  bot.on('whisper', async (chatUsername, message) => {
+  thisBot.on('whisper', async (chatUsername, message) => {
+    if (myGeneration !== reconnectGeneration || thisBot !== bot) return
     if (chatUsername !== CONFIG.owner) return
     let reply = null
     try { reply = await handleMessage(message) } catch (_) {}
-    if (reply) bot.whisper(chatUsername, reply).catch(() => {})
+    if (reply) thisBot.whisper(chatUsername, reply).catch(() => {})
   })
 
   /* ── error / disconnect ── */
-  bot.on('error', err => {
+  thisBot.on('error', err => {
+    if (myGeneration !== reconnectGeneration || thisBot !== bot) return
     const code = err?.code || err?.message
     if (code === 'ECONNRESET') {
       econnresetStreak += 1
@@ -2296,20 +2368,25 @@ function createBot () {
       }
     }
     console.log('[bot] Error:', code)
+    // Some error paths don't emit "end" promptly; schedule fallback reconnect.
+    scheduleReconnect(`error:${String(code).slice(0, 40)}`)
   })
-  bot.on('kicked', reason => {
+
+  thisBot.on('kicked', reason => {
+    if (myGeneration !== reconnectGeneration || thisBot !== bot) return
     reconnectPenaltyMs = Math.min(120000, reconnectPenaltyMs + 15000)
     console.log('[bot] Kicked:', reason)
+    scheduleReconnect('kicked')
   })
-  bot.on('end', reason => {
+
+  thisBot.on('end', reason => {
+    if (myGeneration !== reconnectGeneration || thisBot !== bot) return
     console.log('[bot] Disconnected:', reason || 'socketClosed')
-    if (survivalTimer)  { clearInterval(survivalTimer);  survivalTimer  = null }
-    if (robotTimer)     { clearInterval(robotTimer);     robotTimer     = null }
-    if (autoEatTimer)   { clearInterval(autoEatTimer);   autoEatTimer   = null }
-    stopDefend()
+    clearRuntimeLoops()
     drowningEscape = false
     miningActive = false
-    scheduleReconnect()
+    dragonActive = false
+    scheduleReconnect(reason || 'end')
   })
 }
 
@@ -2323,8 +2400,12 @@ process.on('SIGTERM', gracefulShutdown)
 
 function gracefulShutdown () {
   console.log('[bot] Shutting down...')
-  if (reconnectTimer) clearTimeout(reconnectTimer)
-  if (survivalTimer)  clearInterval(survivalTimer)
+  shuttingDown = true
+  clearReconnectTimers()
+  clearRuntimeLoops()
   if (bot) bot.end()
   process.exit(0)
 }
+
+const http = require('http')
+http.createServer((req, res) => res.end('Bot is running!')).listen(process.env.PORT || 3000)
